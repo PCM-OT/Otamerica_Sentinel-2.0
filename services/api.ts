@@ -159,5 +159,28 @@ export const api = {
         redirect: 'follow'
     });
     return response.json();
+  },
+
+  // NOVA FUNÇÃO SEGURA: Chama a Serverless Function do Vercel
+  askGemini: async (prompt: string) => {
+    try {
+      const response = await fetch('/api/gemini', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ prompt }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Gemini Server Error: ${response.status}`);
+      }
+
+      const json = await response.json();
+      return json;
+    } catch (error) {
+      console.error('Error asking Gemini:', error);
+      throw error;
+    }
   }
 };

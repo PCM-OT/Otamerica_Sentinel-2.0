@@ -68,83 +68,73 @@ function App() {
     return () => clearInterval(intervalId);
   }, [view, selectedItem, isDeleteModalOpen, editingItem]); // Dependências para pausar/retomar o refresh corretamente
 
-  // NOVO: Effect para buscar datas faltantes no histórico
-  // Se um item está ativo mas sem data, busca o último registro para evitar o card "N/A Cinza"
-  useEffect(() => {
-    if (loading || data.length === 0) return;
-
-    // Filtra itens que estão "Ativos" mas não possuem data de validade preenchida
-    // Ignoramos itens já marcados como Obsoleto ou Reprovado na listagem principal pois status prevalece
-    const itemsMissingDate = data.filter(item => {
-        if (item.status === 'Obsoleto' || item.status === 'Reprovado') return false;
-        
-        let dateVal = item.dataValidade;
-        if (item.categoria === 'MANÔMETROS') dateVal = item.dataProximaCalibracao;
-        else if (item.categoria === 'DEMAIS EQUIPAMENTOS') dateVal = item.dataProximaInspecao;
-
-        // Se data for null, undefined, vazia ou 'N/A', considera como faltante
-        return !dateVal || dateVal === '' || dateVal === 'N/A';
-    });
-
-    if (itemsMissingDate.length === 0) return;
-
-    const fillMissingDates = async () => {
-        // Busca histórico em paralelo para os itens afetados
-        const updates = await Promise.all(itemsMissingDate.map(async (item) => {
-            try {
-                const res = await api.getHistory(item.tag);
-                if (res.history && res.history.length > 0) {
-                    // Ordena histórico para garantir que pegamos o mais recente
-                    // Assumimos que timestamps podem vir do backend, senão tenta parsear data
-                    const sortedHistory = res.history.sort((a: any, b: any) => {
-                        const tA = a.dataCalibracaoTimestamp || a.dataValidadeTimestamp || parseDateSafe(a.dataCalibracao || a.dataValidade) || 0;
-                        const tB = b.dataCalibracaoTimestamp || b.dataValidadeTimestamp || parseDateSafe(b.dataCalibracao || b.dataValidade) || 0;
-                        return tB - tA;
-                    });
-
-                    const lastRecord = sortedHistory[0];
-                    
-                    // Define qual campo de data recuperar baseado na categoria
-                    let recoveredDate = null;
-                    if (item.categoria === 'MANÔMETROS') recoveredDate = lastRecord.dataProximaCalibracao || lastRecord.dataValidade;
-                    else if (item.categoria === 'DEMAIS EQUIPAMENTOS') recoveredDate = lastRecord.dataProximaInspecao || lastRecord.dataValidade;
-                    else recoveredDate = lastRecord.dataValidade;
-
-                    if (recoveredDate && recoveredDate !== 'N/A') {
-                        return { tag: item.tag, recoveredDate };
-                    }
-                }
-            } catch (err) {
-                console.warn(`Erro ao recuperar histórico para ${item.tag}`, err);
-            }
-            return null;
-        }));
-
-        const validUpdates = updates.filter(u => u !== null) as { tag: string, recoveredDate: string }[];
-
-        // Atualiza o estado local com as datas recuperadas
-        if (validUpdates.length > 0) {
-            setData(prevData => prevData.map(d => {
-                const match = validUpdates.find(u => u.tag === d.tag);
-                if (match) {
-                    if (d.categoria === 'MANÔMETROS') return { ...d, dataProximaCalibracao: match.recoveredDate };
-                    if (d.categoria === 'DEMAIS EQUIPAMENTOS') return { ...d, dataProximaInspecao: match.recoveredDate };
-                    return { ...d, dataValidade: match.recoveredDate };
-                }
-                return d;
-            }));
-        }
-    };
-
-    fillMissingDates();
-  }, [data.length, loading]);
-
   const fetchData = async (silent = false) => {
     if (!silent) setLoading(true);
     try {
       const res = await api.read();
       if (res.success && Array.isArray(res.data)) {
-        setData(res.data);
+        let initialData = res.data;
+
+        // --- LÓGICA DE CORREÇÃO DE DATAS ---
+        // Executa ANTES de setar o estado para evitar o "pulo" nos números do dashboard
+        const itemsMissingDate = initialData.filter(item => {
+            if (item.status === 'Obsoleto' || item.status === 'Reprovado') return false;
+            
+            let dateVal = item.dataValidade;
+            if (item.categoria === 'MANÔMETROS') dateVal = item.dataProximaCalibracao;
+            else if (item.categoria === 'DEMAIS EQUIPAMENTOS') dateVal = item.dataProximaInspecao;
+
+            // Se data for null, undefined, vazia ou 'N/A', considera como faltante
+            return !dateVal || dateVal === '' || dateVal === 'N/A';
+        });
+
+        if (itemsMissingDate.length > 0) {
+            // Busca histórico em paralelo para os itens afetados
+            const updates = await Promise.all(itemsMissingDate.map(async (item) => {
+                try {
+                    const histRes = await api.getHistory(item.tag);
+                    if (histRes.history && histRes.history.length > 0) {
+                        const sortedHistory = histRes.history.sort((a: any, b: any) => {
+                            const tA = a.dataCalibracaoTimestamp || a.dataValidadeTimestamp || parseDateSafe(a.dataCalibracao || a.dataValidade) || 0;
+                            const tB = b.dataCalibracaoTimestamp || b.dataValidadeTimestamp || parseDateSafe(b.dataCalibracao || b.dataValidade) || 0;
+                            return tB - tA;
+                        });
+
+                        const lastRecord = sortedHistory[0];
+                        
+                        let recoveredDate = null;
+                        if (item.categoria === 'MANÔMETROS') recoveredDate = lastRecord.dataProximaCalibracao || lastRecord.dataValidade;
+                        else if (item.categoria === 'DEMAIS EQUIPAMENTOS') recoveredDate = lastRecord.dataProximaInspecao || lastRecord.dataValidade;
+                        else recoveredDate = lastRecord.dataValidade;
+
+                        if (recoveredDate && recoveredDate !== 'N/A') {
+                            return { tag: item.tag, recoveredDate };
+                        }
+                    }
+                } catch (err) {
+                    console.warn(`Erro ao recuperar histórico para ${item.tag}`, err);
+                }
+                return null;
+            }));
+
+            const validUpdates = updates.filter(u => u !== null) as { tag: string, recoveredDate: string }[];
+
+            // Aplica as correções na lista principal antes de exibir
+            if (validUpdates.length > 0) {
+                initialData = initialData.map(d => {
+                    const match = validUpdates.find(u => u.tag === d.tag);
+                    if (match) {
+                        if (d.categoria === 'MANÔMETROS') return { ...d, dataProximaCalibracao: match.recoveredDate };
+                        if (d.categoria === 'DEMAIS EQUIPAMENTOS') return { ...d, dataProximaInspecao: match.recoveredDate };
+                        return { ...d, dataValidade: match.recoveredDate };
+                    }
+                    return d;
+                });
+            }
+        }
+        // -----------------------------------
+
+        setData(initialData);
       }
     } catch (e) {
       console.error("Failed to fetch", e);
